@@ -297,6 +297,41 @@ func (c *Client) query(surql string) (json.RawMessage, error) {
 	return last.Result, nil
 }
 
+// GetAllRecords returns all records for a zone (used for AXFR zone transfers).
+func (c *Client) GetAllRecords(zoneName string) ([]Record, error) {
+	// Use subquery to find zone ID, then filter records
+	results, err := c.query(
+		fmt.Sprintf("SELECT name, type, content, ttl, priority, weight, port FROM record WHERE zone IN (SELECT VALUE id FROM zone WHERE name = '%s' AND active = true) AND disabled = false;",
+			escapeSurql(zoneName)),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseRecords(results)
+}
+
+// GetZoneSerial returns the current serial for a zone.
+func (c *Client) GetZoneSerial(zoneName string) (uint32, error) {
+	results, err := c.query(
+		fmt.Sprintf("SELECT serial FROM zone WHERE name = '%s' AND active = true LIMIT 1;", escapeSurql(zoneName)),
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	var zones []struct {
+		Serial int `json:"serial"`
+	}
+	if err := json.Unmarshal(results, &zones); err != nil {
+		return 0, err
+	}
+	if len(zones) == 0 {
+		return 0, fmt.Errorf("zone %s not found", zoneName)
+	}
+	return uint32(zones[0].Serial), nil
+}
+
 // parseRecords converts SurrealDB JSON results into Record structs.
 func parseRecords(raw json.RawMessage) ([]Record, error) {
 	var records []Record
