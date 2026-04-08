@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,15 +64,16 @@ func (c *Client) Connect() error {
 
 // Lookup queries SurrealDB for DNS records matching name and type.
 func (c *Client) Lookup(name, qtype string) ([]Record, error) {
-	query := "SELECT name, type, content, ttl, priority, weight, port FROM record WHERE name = $name AND disabled = false"
-	params := map[string]interface{}{"name": name}
-
+	var query string
 	if qtype != "ANY" {
-		query += " AND type = $type"
-		params["type"] = qtype
+		query = fmt.Sprintf("SELECT name, type, content, ttl, priority, weight, port FROM record WHERE name = '%s' AND disabled = false AND type = '%s';",
+			escapeSurql(name), escapeSurql(qtype))
+	} else {
+		query = fmt.Sprintf("SELECT name, type, content, ttl, priority, weight, port FROM record WHERE name = '%s' AND disabled = false;",
+			escapeSurql(name))
 	}
 
-	results, err := c.query(query, params)
+	results, err := c.query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -79,11 +81,15 @@ func (c *Client) Lookup(name, qtype string) ([]Record, error) {
 	return parseRecords(results)
 }
 
+// escapeSurql escapes single quotes for SurrealQL string literals.
+func escapeSurql(s string) string {
+	return strings.ReplaceAll(s, "'", "\\'")
+}
+
 // ZoneExists checks if a zone exists in SurrealDB.
 func (c *Client) ZoneExists(zoneName string) (bool, error) {
 	results, err := c.query(
-		"SELECT count() FROM zone WHERE name = $name AND active = true GROUP ALL",
-		map[string]interface{}{"name": zoneName},
+		fmt.Sprintf("SELECT count() FROM zone WHERE name = '%s' AND active = true GROUP ALL;", escapeSurql(zoneName)),
 	)
 	if err != nil {
 		return false, err
@@ -102,8 +108,7 @@ func (c *Client) ZoneExists(zoneName string) (bool, error) {
 // GetSOA builds an SOA record for a zone from SurrealDB.
 func (c *Client) GetSOA(zoneName string) (dns.RR, error) {
 	results, err := c.query(
-		"SELECT name, serial, refresh, retry, expire, minimum_ttl FROM zone WHERE name = $name AND active = true LIMIT 1",
-		map[string]interface{}{"name": zoneName},
+		fmt.Sprintf("SELECT name, serial, refresh, retry, expire, minimum_ttl FROM zone WHERE name = '%s' AND active = true LIMIT 1;", escapeSurql(zoneName)),
 	)
 	if err != nil {
 		return nil, err
@@ -147,7 +152,7 @@ func (c *Client) GetSOA(zoneName string) (dns.RR, error) {
 
 // GetZones returns all active zone names from SurrealDB.
 func (c *Client) GetZones() ([]string, error) {
-	results, err := c.query("SELECT name FROM zone WHERE active = true", nil)
+	results, err := c.query("SELECT name FROM zone WHERE active = true;")
 	if err != nil {
 		return nil, err
 	}
@@ -236,37 +241,16 @@ type surrealResponse struct {
 	Time   string          `json:"time"`
 }
 
-// query executes a SurrealQL query and returns the result array.
-func (c *Client) query(surql string, params map[string]interface{}) (json.RawMessage, error) {
+// query executes a raw SurrealQL query and returns the result array.
+func (c *Client) query(surql string) (json.RawMessage, error) {
 	token := c.getToken()
 
-	// Build request body with params
-	var bodyStr string
-	if params != nil {
-		// Use parameterized query via JSON body
-		reqBody := map[string]interface{}{
-			"query":  surql,
-			"params": params,
-		}
-		bodyBytes, _ := json.Marshal(reqBody)
-		bodyStr = string(bodyBytes)
-	} else {
-		bodyStr = surql
-	}
-
-	var contentType string
-	if params != nil {
-		contentType = "application/json"
-	} else {
-		contentType = "application/surql"
-	}
-
-	req, err := http.NewRequest("POST", c.config.URL+"/sql", bytes.NewReader([]byte(bodyStr)))
+	req, err := http.NewRequest("POST", c.config.URL+"/sql", bytes.NewReader([]byte(surql)))
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Content-Type", "application/surql")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("surreal-ns", c.config.Namespace)
 	req.Header.Set("surreal-db", c.config.Database)
@@ -286,7 +270,7 @@ func (c *Client) query(surql string, params map[string]interface{}) (json.RawMes
 		if err := c.signin(); err != nil {
 			return nil, fmt.Errorf("re-signin failed: %w", err)
 		}
-		return c.query(surql, params) // recursive retry (once, since token is now fresh)
+		return c.query(surql) // recursive retry (once, since token is now fresh)
 	}
 
 	if resp.StatusCode != http.StatusOK {
