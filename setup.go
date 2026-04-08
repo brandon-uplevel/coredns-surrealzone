@@ -29,15 +29,6 @@ func defaultConfig() *Config {
 	}
 }
 
-// Corefile syntax:
-//
-//	surrealzone {
-//	    url https://db.hellojade.app
-//	    namespace hellojade
-//	    database dns
-//	    username dns_zones
-//	    password secret
-//	}
 func setup(c *caddy.Controller) error {
 	config, err := parseConfig(c)
 	if err != nil {
@@ -46,9 +37,14 @@ func setup(c *caddy.Controller) error {
 
 	client := NewClient(config)
 
-	// Connect and discover zones at startup
-	var zones []string
+	// Create the handler — zones will be populated on startup
+	sz := &SurrealZone{
+		client: client,
+		config: config,
+		zones:  []string{},
+	}
 
+	// Connect and discover zones at startup
 	c.OnStartup(func() error {
 		if err := client.Connect(); err != nil {
 			return plugin.Error("surrealzone", err)
@@ -58,18 +54,14 @@ func setup(c *caddy.Controller) error {
 		if err != nil {
 			return plugin.Error("surrealzone", err)
 		}
-		zones = z
-		log.Infof("Serving %d zones from SurrealDB: %v", len(zones), zones)
+		sz.zones = z
+		log.Infof("Serving %d zones from SurrealDB: %v", len(sz.zones), sz.zones)
 		return nil
 	})
 
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return &SurrealZone{
-			Next:   next,
-			client: client,
-			config: config,
-			zones:  zones,
-		}
+		sz.Next = next
+		return sz
 	})
 
 	// Refresh zone list periodically
@@ -83,7 +75,7 @@ func setup(c *caddy.Controller) error {
 					log.Errorf("Failed to refresh zones: %v", err)
 					continue
 				}
-				zones = z
+				sz.zones = z
 			}
 		}()
 		return nil
